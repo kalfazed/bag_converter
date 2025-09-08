@@ -23,8 +23,44 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <iomanip>
+#include <sstream>
+#include <chrono>
+#include <ctime>
+#include <fstream>
+#include <map>
 
 namespace fs = std::filesystem;
+
+// Helper function to convert Unix timestamp to human-readable format
+std::string formatTimestamp(uint64_t timestamp_ns) {
+    // Convert nanoseconds to seconds
+    uint64_t timestamp_sec = timestamp_ns / 1000000000;
+    uint64_t nanoseconds = timestamp_ns % 1000000000;
+    
+    // Convert to time_t
+    std::time_t time_t_value = static_cast<std::time_t>(timestamp_sec);
+    
+    // Convert to tm structure
+    std::tm* tm_ptr = std::gmtime(&time_t_value);
+    if (!tm_ptr) {
+        return "Invalid timestamp";
+    }
+    
+    // Format nanoseconds as xxx:yyy:zzz (milliseconds:microseconds:nanoseconds)
+    uint64_t milliseconds = nanoseconds / 1000000;
+    uint64_t microseconds = (nanoseconds % 1000000) / 1000;
+    uint64_t remaining_nanoseconds = nanoseconds % 1000;
+    
+    // Format as year-month-day:hour-minutes-sec:xxx:yyy:zzz
+    std::ostringstream oss;
+    oss << std::put_time(tm_ptr, "%Y-%m-%d:%H-%M-%S");
+    oss << ":" << std::setfill('0') << std::setw(3) << milliseconds;
+    oss << ":" << std::setfill('0') << std::setw(3) << microseconds;
+    oss << ":" << std::setfill('0') << std::setw(3) << remaining_nanoseconds;
+    
+    return oss.str();
+}
 
 class SeyondNebulaBagDecoder
 {
@@ -64,6 +100,16 @@ public:
       std::cout << "  Sensor model: " << config_.sensor_model << "\n"
                 << "  Min range: " << config_.min_range << " m\n"
                 << "  Max range: " << config_.max_range << " m\n";
+    }
+  }
+  
+  ~SeyondNebulaBagDecoder() {
+    // Close all debug files
+    for (auto& [frame_id, file_stream] : debug_files_) {
+      if (file_stream.is_open()) {
+        file_stream.close();
+        std::cout << "Closed debug file: " << frame_id << "_debug.txt" << std::endl;
+      }
     }
   }
   
@@ -293,7 +339,21 @@ public:
           pc2_msg.header.stamp.nanosec = bag_message->time_stamp % 1000000000;
           pc2_msg.header.frame_id = nebula_msgs.header.frame_id.empty() ? 
                                      decoder->GetConfig().frame_id : nebula_msgs.header.frame_id;
+         
+          // debug the timestamp of the timestamp of this pc2_msg and original bag_message
+          std::cout << "================================================" << std::endl;
+          std::cout << "frame_id: " << pc2_msg.header.frame_id << std::endl;
+          std::cout << "generated simple_cloud size: " << simple_cloud.points.size() << std::endl;
+          std::cout << "Number of packets processed: " << packets_processed << std::endl;
+          std::cout << "Number of clouds generated: " << clouds_generated << std::endl;
+          std::cout << "pc2_msg timestamp (human-readable): " << formatTimestamp(bag_message->time_stamp) << std::endl;
+          std::cout << "================================================" << std::endl;
           
+          // Write debug information to frame_id specific file
+          std::ofstream& debug_file = getDebugFile(pc2_msg.header.frame_id);
+          debug_file << pc2_msg.header.frame_id << ": " << formatTimestamp(bag_message->time_stamp) << std::endl;
+          debug_file.flush(); // Ensure data is written immediately
+
           // Serialize and write to bag
           rclcpp::SerializedMessage serialized_pc2;
           pc2_serializer.serialize_message(&pc2_msg, &serialized_pc2);
@@ -337,7 +397,7 @@ public:
                   << packets_processed << " nebula packets" << std::endl;
       }
     }
-    
+   
     std::cout << "\n========== Conversion Summary ==========" << std::endl;
     std::cout << "Total messages processed: " << message_count << std::endl;
     std::cout << "Total Nebula packets processed: " << packets_processed << std::endl;
@@ -359,6 +419,21 @@ public:
 
 private:
   Config config_;
+  
+  // Debug file streams for each frame_id
+  std::map<std::string, std::ofstream> debug_files_;
+  
+  // Helper function to get or create debug file stream
+  std::ofstream& getDebugFile(const std::string& frame_id) {
+    auto it = debug_files_.find(frame_id);
+    if (it == debug_files_.end()) {
+      // Create new file stream
+      std::string filename = frame_id + "_debug.txt";
+      debug_files_[frame_id] = std::ofstream(filename, std::ios::out | std::ios::app);
+      std::cout << "Created debug file: " << filename << std::endl;
+    }
+    return debug_files_[frame_id];
+  }
 };
 
 int main(int argc, char** argv)
