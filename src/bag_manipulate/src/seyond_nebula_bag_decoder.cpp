@@ -81,6 +81,9 @@ public:
     bool use_reflectance = true;
     std::string calibration_file = "";
     
+    // Merging configuration
+    double timestamp_tolerance_ms = 50.0;  // Tolerance in milliseconds for merging pointclouds
+    
     bool verbose = false;
   };
   
@@ -414,11 +417,30 @@ public:
     }
     // Show the size of the timestamped_pointclouds_
     std::cout << "Size of timestamped_pointclouds_: " << timestamped_pointclouds_.size() << std::endl;
+    
+    // Process merged pointclouds if we have multiple lidars
+    size_t merged_clouds_generated = 0;
+    if (nebula_topic_mapping.size() > 1) {
+      std::cout << "\nProcessing merged pointclouds with tolerance: " 
+                << config_.timestamp_tolerance_ms << "ms..." << std::endl;
+      
+      // Group pointclouds by time windows
+      auto time_groups = groupPointCloudsByTimeWindow();
+      
+      std::cout << "Created " << time_groups.size() << " time groups from " 
+                << timestamped_pointclouds_.size() << " timestamped pointclouds" << std::endl;
+      
+    }
    
     std::cout << "\n========== Conversion Summary ==========" << std::endl;
     std::cout << "Total messages processed: " << message_count << std::endl;
     std::cout << "Total Nebula packets processed: " << packets_processed << std::endl;
     std::cout << "Total point clouds generated: " << clouds_generated << std::endl;
+
+    if (nebula_topic_mapping.size() > 1) {
+      std::cout << "Total merged point clouds generated: " << merged_clouds_generated << std::endl;
+    }
+
     std::cout << "Calibration packets found: " << calibration_packets << std::endl;
     
     if (!topic_conversion_counts.empty()) {
@@ -454,6 +476,64 @@ private:
       std::cout << "Created debug file: " << filename << std::endl;
     }
     return debug_files_[frame_id];
+  }
+  
+  // Helper function to group pointclouds by time windows
+  std::vector<std::map<std::string, sensor_msgs::msg::PointCloud2>> groupPointCloudsByTimeWindow() {
+    std::vector<std::map<std::string, sensor_msgs::msg::PointCloud2>> groups;
+    
+    if (timestamped_pointclouds_.empty()) {
+      return groups;
+    }
+    
+    // Convert tolerance from milliseconds to nanoseconds
+    uint64_t tolerance_ns = static_cast<uint64_t>(config_.timestamp_tolerance_ms * 1000000);
+    
+    // Sort timestamps for processing
+    std::vector<uint64_t> sorted_timestamps;
+    for (const auto& [timestamp, _] : timestamped_pointclouds_) {
+      sorted_timestamps.push_back(timestamp);
+    }
+    std::sort(sorted_timestamps.begin(), sorted_timestamps.end());
+    
+    for (uint64_t timestamp : sorted_timestamps) {
+      const auto& pointclouds = timestamped_pointclouds_[timestamp];
+      
+      // Check if this timestamp can be merged with any existing group
+      bool merged = false;
+      for (auto& group : groups) {
+        // Check if any pointcloud in this group is within tolerance
+        bool within_tolerance = false;
+        for (const auto& [frame_id, pc] : group) {
+          // Check timestamp difference between the group's pointcloud and current timestamp
+          uint64_t pc_timestamp = pc.header.stamp.sec * 1000000000ULL + pc.header.stamp.nanosec;
+          uint64_t time_diff = (timestamp > pc_timestamp) ? 
+                              timestamp - pc_timestamp : 
+                              pc_timestamp - timestamp;
+          
+          if (time_diff <= tolerance_ns) {
+            within_tolerance = true;
+            break;
+          }
+        }
+        
+        if (within_tolerance) {
+          // Merge pointclouds from this timestamp into the group
+          for (const auto& [frame_id, pc] : pointclouds) {
+            group[frame_id] = pc;
+          }
+          merged = true;
+          break;
+        }
+      }
+      
+      if (!merged) {
+        // Create a new group
+        groups.push_back(pointclouds);
+      }
+    }
+    
+    return groups;
   }
   
   // Helper function to concatenate pointclouds
