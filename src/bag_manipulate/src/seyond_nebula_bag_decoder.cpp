@@ -83,7 +83,7 @@ public:
     
     // Merging configuration
     double timestamp_tolerance_ms = 50.0;  // Tolerance in milliseconds for merging pointclouds
-    std::string merged_topic_name = "/sensing/lidar/concatenated/pointcloud";
+    std::string merged_topic_name = "/sensing/lidar/concatenated/pointcloud2";
     std::string merged_frame_id = "base_link";
 
     bool verbose = false;
