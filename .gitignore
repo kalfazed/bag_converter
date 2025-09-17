@@ -2,6 +2,10 @@
 *.swp
 *.swo
 
+# clangd
+.clangd
+compile_commands.json
+
 # Visual Studio Code
 .vscode/
 *.code-workspace
