@@ -430,6 +430,50 @@ public:
       std::cout << "Created " << time_groups.size() << " time groups from " 
                 << timestamped_pointclouds_.size() << " timestamped pointclouds" << std::endl;
       
+      for (const auto& group : time_groups) {
+        // Check if we have pointclouds from all expected lidars
+        if (group.size() == nebula_topic_mapping.size() - 1) {
+          // All lidars have data for this time group, merge them
+          sensor_msgs::msg::PointCloud2 merged_cloud = concatenatePointClouds(group);
+          
+          // Use the earliest timestamp from the group
+          uint64_t earliest_timestamp = UINT64_MAX;
+          for (const auto& [frame_id, pc] : group) {
+            uint64_t pc_timestamp = pc.header.stamp.sec * 1000000000ULL + pc.header.stamp.nanosec;
+            if (pc_timestamp < earliest_timestamp) {
+              earliest_timestamp = pc_timestamp;
+            }
+          }
+          
+          // Set timestamp
+          merged_cloud.header.stamp.sec = earliest_timestamp / 1000000000;
+          merged_cloud.header.stamp.nanosec = earliest_timestamp % 1000000000;
+          
+          // Serialize and write merged pointcloud
+          rclcpp::SerializedMessage serialized_merged;
+          pc2_serializer.serialize_message(&merged_cloud, &serialized_merged);
+          
+          auto merged_bag_msg = std::make_shared<rosbag2_storage::SerializedBagMessage>();
+          merged_bag_msg->topic_name = merged_topic_name_;
+          merged_bag_msg->time_stamp = earliest_timestamp;
+          merged_bag_msg->serialized_data = std::make_shared<rcutils_uint8_array_t>(
+            serialized_merged.release_rcl_serialized_message());
+          
+          writer.write(merged_bag_msg);
+          merged_clouds_generated++;
+          std::cout << "merging pointclouds for frame_id: " << merged_clouds_generated << ": timestamp: " << formatTimestamp(earliest_timestamp) << std::endl;
+
+        } else {
+          // Some lidars missing data for this time group, skip
+          if (config_.verbose) {
+            std::cout << "Skipping time group - only " << group.size() << " of " 
+                      << nebula_topic_mapping.size() << " lidars have data" << std::endl;
+          }
+        }
+      }
+      
+      std::cout << "Generated " << merged_clouds_generated << " merged point clouds from "
+                << time_groups.size() << " time groups" << std::endl;
     }
    
     std::cout << "\n========== Conversion Summary ==========" << std::endl;
