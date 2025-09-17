@@ -277,6 +277,16 @@ public:
       }
     }
     
+    // Create merged pointcloud topic if we have multiple lidars
+    if (nebula_topic_mapping.size() > 1) {
+      rosbag2_storage::TopicMetadata merged_topic_meta;
+      merged_topic_meta.name = merged_topic_name_;
+      merged_topic_meta.type = "sensor_msgs/msg/PointCloud2";
+      merged_topic_meta.serialization_format = "cdr";
+      writer.create_topic(merged_topic_meta);
+      std::cout << "Created merged pointcloud topic: " << merged_topic_name_ << std::endl;
+    }
+    
     // Process messages
     rclcpp::Serialization<nebula_msgs::msg::NebulaPackets> nebula_serializer;
     rclcpp::Serialization<sensor_msgs::msg::PointCloud2> pc2_serializer;
@@ -354,6 +364,11 @@ public:
           debug_file << pc2_msg.header.frame_id << ": " << formatTimestamp(bag_message->time_stamp) << std::endl;
           debug_file.flush(); // Ensure data is written immediately
 
+          // Store pointcloud for merging if we have multiple lidars
+          if (nebula_topic_mapping.size() > 1) {
+            timestamped_pointclouds_[bag_message->time_stamp][pc2_msg.header.frame_id] = pc2_msg;
+          }
+          
           // Serialize and write to bag
           rclcpp::SerializedMessage serialized_pc2;
           pc2_serializer.serialize_message(&pc2_msg, &serialized_pc2);
@@ -397,6 +412,8 @@ public:
                   << packets_processed << " nebula packets" << std::endl;
       }
     }
+    // Show the size of the timestamped_pointclouds_
+    std::cout << "Size of timestamped_pointclouds_: " << timestamped_pointclouds_.size() << std::endl;
    
     std::cout << "\n========== Conversion Summary ==========" << std::endl;
     std::cout << "Total messages processed: " << message_count << std::endl;
@@ -423,6 +440,10 @@ private:
   // Debug file streams for each frame_id
   std::map<std::string, std::ofstream> debug_files_;
   
+  // Pointcloud message storage for merging
+  std::map<uint64_t, std::map<std::string, sensor_msgs::msg::PointCloud2>> timestamped_pointclouds_;
+  std::string merged_topic_name_ = "/merged_lidar_points";
+  
   // Helper function to get or create debug file stream
   std::ofstream& getDebugFile(const std::string& frame_id) {
     auto it = debug_files_.find(frame_id);
@@ -433,6 +454,37 @@ private:
       std::cout << "Created debug file: " << filename << std::endl;
     }
     return debug_files_[frame_id];
+  }
+  
+  // Helper function to concatenate pointclouds
+  sensor_msgs::msg::PointCloud2 concatenatePointClouds(const std::map<std::string, sensor_msgs::msg::PointCloud2>& pointclouds) {
+    if (pointclouds.empty()) {
+      return sensor_msgs::msg::PointCloud2{};
+    }
+    
+    // Use the first pointcloud as base
+    auto it = pointclouds.begin();
+    sensor_msgs::msg::PointCloud2 merged = it->second;
+    ++it;
+    
+    // Concatenate remaining pointclouds
+    for (; it != pointclouds.end(); ++it) {
+      // Convert to PCL for concatenation
+      pcl::PointCloud<pcl::PointXYZI> pcl_merged, pcl_current;
+      pcl::fromROSMsg(merged, pcl_merged);
+      pcl::fromROSMsg(it->second, pcl_current);
+      
+      // Concatenate
+      pcl_merged += pcl_current;
+      
+      // Convert back to ROS message
+      pcl::toROSMsg(pcl_merged, merged);
+    }
+    
+    // Update header with merged frame_id
+    merged.header.frame_id = "merged_lidar";
+    
+    return merged;
   }
 };
 
