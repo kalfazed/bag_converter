@@ -586,31 +586,66 @@ private:
   // Helper function to concatenate pointclouds
   sensor_msgs::msg::PointCloud2 concatenatePointClouds(const std::map<std::string, sensor_msgs::msg::PointCloud2>& pointclouds, const std::string& frame_id) {
     if (pointclouds.empty()) {
+      std::cout << "[concatenatePointClouds] No pointclouds to merge." << std::endl;
       return sensor_msgs::msg::PointCloud2{};
     }
-    
+
+    std::cout << "[concatenatePointClouds] Number of sensor_msgs::msg::PointCloud2 to merge: " << pointclouds.size() << std::endl;
+    //printout the header.frame_id for each pointcloud
+    for (const auto& [frame_id, pc] : pointclouds) {
+      std::cout << "[concatenatePointClouds] frame_id: " << frame_id << std::endl;
+    }
+
     // Use the first pointcloud as base
     auto it = pointclouds.begin();
     sensor_msgs::msg::PointCloud2 merged = it->second;
     ++it;
-    
+
     // Concatenate remaining pointclouds
     for (; it != pointclouds.end(); ++it) {
       // Convert to PCL for concatenation
       pcl::PointCloud<pcl::PointXYZI> pcl_merged, pcl_current;
       pcl::fromROSMsg(merged, pcl_merged);
       pcl::fromROSMsg(it->second, pcl_current);
-      
+
+      // Rotate points based on frame_id
+      std::string current_frame = it->first;
+      if (current_frame == "lidar_rear") {
+        // Rotate 180 degrees around Z axis
+        for (auto& pt : pcl_current.points) {
+          float x_new = -pt.x;
+          float y_new = -pt.y;
+          pt.x = x_new;
+          pt.y = y_new;
+        }
+      } else if (current_frame == "lidar_left") {
+        // Rotate 90 degrees CCW (left) around Z axis
+        for (auto& pt : pcl_current.points) {
+          float x_new = -pt.y;
+          float y_new = pt.x;
+          pt.x = x_new;
+          pt.y = y_new;
+        }
+      } else if (current_frame == "lidar_right") {
+        // Rotate 90 degrees CW (right) around Z axis
+        for (auto& pt : pcl_current.points) {
+          float x_new = pt.y;
+          float y_new = -pt.x;
+          pt.x = x_new;
+          pt.y = y_new;
+        }
+      }
+
       // Concatenate
       pcl_merged += pcl_current;
-      
+
       // Convert back to ROS message
       pcl::toROSMsg(pcl_merged, merged);
     }
-    
+
     // Update header with merged frame_id
     merged.header.frame_id = frame_id;
-    
+
     return merged;
   }
 };
