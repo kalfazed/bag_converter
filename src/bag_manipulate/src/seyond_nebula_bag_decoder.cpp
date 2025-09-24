@@ -17,6 +17,13 @@
 
 #include <std_msgs/msg/header.hpp>
 #include <builtin_interfaces/msg/time.hpp>
+#include <tf2_msgs/msg/tf_message.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <geometry_msgs/msg/vector3.hpp>
+#include <geometry_msgs/msg/quaternion.hpp>
+#include <tf2/LinearMath/Transform.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Vector3.h>
 
 #include <filesystem>
 #include <iostream>
@@ -295,6 +302,7 @@ public:
     // Process messages
     rclcpp::Serialization<nebula_msgs::msg::NebulaPackets> nebula_serializer;
     rclcpp::Serialization<sensor_msgs::msg::PointCloud2> pc2_serializer;
+    rclcpp::Serialization<tf2_msgs::msg::TFMessage> tf_serializer;
     
     size_t message_count = 0;
     size_t packets_processed = 0;
@@ -306,9 +314,49 @@ public:
       auto bag_message = reader.read_next();
       message_count++;
       
+      // Check if this is a tf_static topic
+      if (bag_message->topic_name == "/tf_static") {
+        // Process TF static transforms
+        try {
+          rclcpp::SerializedMessage serialized_msg(*bag_message->serialized_data);
+          tf2_msgs::msg::TFMessage tf_msg;
+          tf_serializer.deserialize_message(&serialized_msg, &tf_msg);
+          
+          // Store transforms for later use
+          for (const auto& transform : tf_msg.transforms) {
+            std::string child_frame = transform.child_frame_id;
+            std::string parent_frame = transform.header.frame_id;
+            
+            // Create tf2::Transform from the message
+            tf2::Vector3 translation(
+              transform.transform.translation.x,
+              transform.transform.translation.y,
+              transform.transform.translation.z
+            );
+            tf2::Quaternion rotation(
+              transform.transform.rotation.x,
+              transform.transform.rotation.y,
+              transform.transform.rotation.z,
+              transform.transform.rotation.w
+            );
+            tf2::Transform tf_transform(rotation, translation);
+            
+            // Store the transform from child_frame to parent_frame
+            tf_transforms_[child_frame] = tf_transform;
+            
+            if (config_.verbose) {
+              std::cout << "Stored TF transform: " << child_frame << " -> " << parent_frame << std::endl;
+            }
+          }
+        } catch (const std::exception& e) {
+          std::cerr << "Error processing TF static message: " << e.what() << std::endl;
+        }
+        
+        // Copy original TF message to output
+        writer.write(bag_message);
+      }
       // Check if this is a nebula topic to convert
-      auto it = nebula_topic_mapping.find(bag_message->topic_name);
-      if (it != nebula_topic_mapping.end()) {
+      else if (auto it = nebula_topic_mapping.find(bag_message->topic_name); it != nebula_topic_mapping.end()) {
         // Copy original nebula packets message to output
         writer.write(bag_message);
         
@@ -513,6 +561,9 @@ private:
   // Pointcloud message storage for merging
   std::map<uint64_t, std::map<std::string, sensor_msgs::msg::PointCloud2>> timestamped_pointclouds_;
   
+  // TF transforms storage
+  std::map<std::string, tf2::Transform> tf_transforms_;  // frame_id -> transform to base_link
+  
   // Helper function to get or create debug file stream
   std::ofstream& getDebugFile(const std::string& frame_id) {
     auto it = debug_files_.find(frame_id);
@@ -583,6 +634,70 @@ private:
     return groups;
   }
   
+  // Helper function to transform pointcloud to base_link frame
+  sensor_msgs::msg::PointCloud2 transformPointCloudToBaseLink(const sensor_msgs::msg::PointCloud2& input_cloud, const std::string& source_frame) {
+    sensor_msgs::msg::PointCloud2 transformed_cloud = input_cloud;
+    
+    // Check if we have a transform for this frame
+    auto tf_it = tf_transforms_.find(source_frame);
+    if (tf_it == tf_transforms_.end()) {
+      std::cerr << "Warning: No TF transform found for frame " << source_frame << ", using original cloud" << std::endl;
+      return input_cloud;
+    }
+    
+    const tf2::Transform& transform = tf_it->second;
+    if (config_.verbose) {
+      const tf2::Vector3& t = transform.getOrigin();
+      const tf2::Quaternion& q = transform.getRotation();
+      std::cout << "[transformPointCloudToBaseLink] frame_id: " << source_frame << std::endl;
+      std::cout << "  Transform translation: x=" << t.x() << ", y=" << t.y() << ", z=" << t.z() << std::endl;
+      std::cout << "  Transform rotation (quaternion): x=" << q.x() << ", y=" << q.y() << ", z=" << q.z() << ", w=" << q.w() << std::endl;
+    }
+
+    
+    // Convert to PCL for transformation
+    pcl::PointCloud<pcl::PointXYZI> pcl_cloud;
+    pcl::fromROSMsg(input_cloud, pcl_cloud);
+    
+    // Transform each point
+    for (auto& point : pcl_cloud.points) {
+      tf2::Vector3 point_vec(point.x, point.y, point.z);
+      tf2::Vector3 transformed_point = transform * point_vec;
+      
+      point.x = transformed_point.x();
+      point.y = transformed_point.y();
+      point.z = transformed_point.z();
+    }
+
+    // Apply additional fixed transform: translation (0.863100, 0.000000, 1.736750), rotation (0.000000, -0.002500, 0.000000, 0.999997)
+    {
+      tf2::Vector3 extra_translation(0.863100, 0.000000, 1.736750);
+      tf2::Quaternion extra_rotation(0.000000, -0.002500, 0.000000, 0.999997);
+      tf2::Transform extra_transform(extra_rotation, extra_translation);
+
+      for (auto& point : pcl_cloud.points) {
+        tf2::Vector3 point_vec(point.x, point.y, point.z);
+        tf2::Vector3 transformed_point = extra_transform * point_vec;
+
+        point.x = transformed_point.x();
+        point.y = transformed_point.y();
+        point.z = transformed_point.z();
+      }
+    }
+    
+    // Convert back to ROS message
+    pcl::toROSMsg(pcl_cloud, transformed_cloud);
+    
+    // Update frame_id to base_link
+    transformed_cloud.header.frame_id = "base_link";
+    
+    if (config_.verbose) {
+      std::cout << "Transformed pointcloud from " << source_frame << " to base_link" << std::endl;
+    }
+    
+    return transformed_cloud;
+  }
+  
   // Helper function to concatenate pointclouds
   sensor_msgs::msg::PointCloud2 concatenatePointClouds(const std::map<std::string, sensor_msgs::msg::PointCloud2>& pointclouds, const std::string& frame_id) {
     if (pointclouds.empty()) {
@@ -596,45 +711,24 @@ private:
       std::cout << "[concatenatePointClouds] frame_id: " << frame_id << std::endl;
     }
 
-    // Use the first pointcloud as base
-    auto it = pointclouds.begin();
+    // Transform all pointclouds to base_link frame before concatenation
+    std::map<std::string, sensor_msgs::msg::PointCloud2> transformed_clouds;
+    for (const auto& [frame_id, pc] : pointclouds) {
+      sensor_msgs::msg::PointCloud2 transformed_pc = transformPointCloudToBaseLink(pc, frame_id);
+      transformed_clouds[frame_id] = transformed_pc;
+    }
+
+    // Use the first transformed pointcloud as base
+    auto it = transformed_clouds.begin();
     sensor_msgs::msg::PointCloud2 merged = it->second;
     ++it;
 
-    // Concatenate remaining pointclouds
-    for (; it != pointclouds.end(); ++it) {
+    // Concatenate remaining transformed pointclouds
+    for (; it != transformed_clouds.end(); ++it) {
       // Convert to PCL for concatenation
       pcl::PointCloud<pcl::PointXYZI> pcl_merged, pcl_current;
       pcl::fromROSMsg(merged, pcl_merged);
       pcl::fromROSMsg(it->second, pcl_current);
-
-      // Rotate points based on frame_id
-      std::string current_frame = it->first;
-      if (current_frame == "lidar_rear") {
-        // Rotate 180 degrees around Z axis
-        for (auto& pt : pcl_current.points) {
-          float x_new = -pt.x;
-          float y_new = -pt.y;
-          pt.x = x_new;
-          pt.y = y_new;
-        }
-      } else if (current_frame == "lidar_left") {
-        // Rotate 90 degrees CCW (left) around Z axis
-        for (auto& pt : pcl_current.points) {
-          float x_new = -pt.y;
-          float y_new = pt.x;
-          pt.x = x_new;
-          pt.y = y_new;
-        }
-      } else if (current_frame == "lidar_right") {
-        // Rotate 90 degrees CW (right) around Z axis
-        for (auto& pt : pcl_current.points) {
-          float x_new = pt.y;
-          float y_new = -pt.x;
-          pt.x = x_new;
-          pt.y = y_new;
-        }
-      }
 
       // Concatenate
       pcl_merged += pcl_current;

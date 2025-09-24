@@ -22,6 +22,9 @@ find_package(seyond_decoder REQUIRED)
 find_package(seyond_nebula_decoder REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(builtin_interfaces REQUIRED)
+find_package(tf2_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(tf2 REQUIRED)
 
 add_executable(bag_manipulate
   src/bag_manipulate.cpp
@@ -94,9 +97,50 @@ ament_target_dependencies(seyond_nebula_bag_decoder
   rosbag2_storage
   pcl_conversions
   seyond_nebula_decoder
+  tf2_msgs
+  geometry_msgs
+  tf2
 )
 
 install(TARGETS seyond_nebula_bag_decoder
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# Build bag_timestamp_analyzer executable
+add_executable(bag_timestamp_analyzer
+  src/bag_timestamp_analyzer.cpp
+)
+
+ament_target_dependencies(bag_timestamp_analyzer
+  rclcpp
+  rosbag2_cpp
+  rosbag2_storage
+  rosbag2_storage_default_plugins
+  rcpputils
+  rcutils
+)
+
+install(TARGETS bag_timestamp_analyzer
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# Build bag_tf_analyzer executable
+add_executable(bag_tf_analyzer
+  src/bag_tf_analyzer.cpp
+)
+
+ament_target_dependencies(bag_tf_analyzer
+  rclcpp
+  rosbag2_cpp
+  rosbag2_storage
+  rosbag2_storage_default_plugins
+  rcpputils
+  rcutils
+  tf2_msgs
+  geometry_msgs
+)
+
+install(TARGETS bag_tf_analyzer
   DESTINATION lib/${PROJECT_NAME}
 )
 
